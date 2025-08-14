@@ -233,8 +233,10 @@ func (a *app) addToWatchFile(realPath string) (added bool) {
 
 // handleFileRemoval removes a file from the watchedFiles map.
 func (a *app) handleFileRemoval(path string) {
-	a.watchedFiles.Delete(path)
-	log.Printf("Info: Stopped watching file: %s\n", path)
+	_, ok := a.watchedFiles.LoadAndDelete(path)
+	if ok {
+		log.Printf("Info: Stopped watching file: %s\n", path)
+	}
 }
 
 // handleDirRemoval removes a directory from the dirWatcher.
