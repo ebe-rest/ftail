@@ -41,6 +41,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -136,42 +137,20 @@ func (a *app) setupWatchers() {
 	newlyAddedFiles := make(map[string]bool)
 	newlyAddedDirs := make(map[string]bool)
 
-	for _, p := range a.globPatterns {
-		// Split the glob pattern into the base directory and the rest of the pattern.
-		base, pattern := doublestar.SplitPattern(p)
-		fs := os.DirFS(base)
-		// Use doublestar.GlobWalk to match bash-like globs with a callback.
-		err := doublestar.GlobWalk(fs, pattern, func(path string, d os.DirEntry) (err error) {
-			resolvedPath := filepath.Join(base, path)
-
-			absolutePath, err := filepath.Abs(resolvedPath)
-			if err != nil {
-				absolutePath = resolvedPath
-			}
-
-			// Resolve symlinks and get the real path.
-			realPath, err := filepath.EvalSymlinks(absolutePath)
-			if err != nil {
-				realPath = absolutePath
-			}
-
-			// Add the parent directory to the directory watcher.
-			realDir := filepath.Dir(realPath)
-			if added := a.addToWatchDir(realDir); added {
-				newlyAddedDirs[realDir] = true
-			}
-
-			// Add the file to the watch list.
-			if added := a.addToWatchFile(realPath); added {
-				newlyAddedFiles[realPath] = true
-			}
-
-			return nil
-		})
-		if err != nil {
-			log.Printf("Error: with glob pattern %s: %v\n", p, err)
+	_ = a.globWalk(func(realPath string) error {
+		// Add the parent directory to the directory watcher.
+		realDir := filepath.Dir(realPath)
+		if added := a.addToWatchDir(realDir); added {
+			newlyAddedDirs[realDir] = true
 		}
-	}
+
+		// Add the file to the watch list.
+		if added := a.addToWatchFile(realPath); added {
+			newlyAddedFiles[realPath] = true
+		}
+
+		return nil
+	})
 
 	// Remove files that no longer match the glob pattern.
 	a.watchedFiles.Range(func(key, _ interface{}) bool {
@@ -268,7 +247,7 @@ func (a *app) handleDirEvents() {
 			}
 
 			// Handle new files created in a watched directory.
-			if event.Op&fsnotify.Create != 0 {
+			if event.Op&fsnotify.Create != 0 && a.globMatch(event.Name) {
 				a.addToWatchFile(event.Name)
 			}
 
@@ -389,4 +368,55 @@ func (a *app) scanForNewFiles() {
 	for range ticker.C {
 		a.setupWatchers()
 	}
+}
+
+func (a *app) globWalk(action func(realPath string) error) error {
+	files := make(map[string]bool)
+	for _, p := range a.globPatterns {
+		// Split the glob pattern into the base directory and the rest of the pattern.
+		base, pattern := doublestar.SplitPattern(p)
+		fs := os.DirFS(base)
+		// Use doublestar.GlobWalk to match bash-like globs with a callback.
+		err := doublestar.GlobWalk(fs, pattern, func(path string, d os.DirEntry) (err error) {
+			resolvedPath := filepath.Join(base, path)
+
+			absolutePath, err := filepath.Abs(resolvedPath)
+			if err != nil {
+				absolutePath = resolvedPath
+			}
+
+			// Resolve symlinks and get the real path.
+			realPath, err := filepath.EvalSymlinks(absolutePath)
+			if err != nil {
+				realPath = absolutePath
+			}
+
+			_, contain := files[realPath]
+			if contain {
+				return nil
+			}
+
+			err = action(realPath)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+		if err != nil {
+			log.Printf("Error: with glob pattern %s: %v\n", p, err)
+		}
+	}
+	return nil
+}
+
+func (a *app) globMatch(realPath string) bool {
+	found := errors.New("glob is match")
+	err := a.globWalk(func(path string) error {
+		if path == realPath {
+			return found
+		}
+		return nil
+	})
+	return errors.Is(err, found)
 }
