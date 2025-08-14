@@ -69,12 +69,15 @@ var theArgs args
 type app struct {
 	// watchedFiles is a map of files being watched.
 	// The key is the file's real path and the value is the read offset.
+	// We use sync.Map for thread-safe access from multiple goroutines.
 	watchedFiles sync.Map
 	// The key is the dir's real path and the value is the result of error of dirWatcher.Add.
+	// We use sync.Map for thread-safe access from multiple goroutines.
 	watchedDirs sync.Map
 	// globPatterns is a list of glob patterns provided via command line.
 	globPatterns []string
 	// dirWatcher is a watcher for directory changes.
+	// It uses fsnotify to detect file creation, deletion, and renaming.
 	dirWatcher *fsnotify.Watcher
 	// args is an anonymous field that allows direct access to the command-line arguments.
 	*args
@@ -134,6 +137,8 @@ func main() {
 // setupWatchers initializes the list of files to be watched and sets their initial read offsets.
 // It also adds the root directories of the glob patterns to the directory watcher.
 func (a *app) setupWatchers() {
+	// Use local maps to keep track of newly added files and directories during this run
+	// before updating the main app state.
 	newlyAddedFiles := make(map[string]bool)
 	newlyAddedDirs := make(map[string]bool)
 
@@ -165,6 +170,7 @@ func (a *app) setupWatchers() {
 	})
 
 	// Remove directories that no longer contain watched files.
+	// This is important to not leak file watchers.
 	a.watchedDirs.Range(func(key, _ interface{}) bool {
 		dir := key.(string)
 		if _, ok := newlyAddedDirs[dir]; !ok {
@@ -179,6 +185,7 @@ func (a *app) setupWatchers() {
 // addToWatchDir adds a directory to the dirWatcher. It returns true if the directory
 // was successfully added or was already being watched.
 func (a *app) addToWatchDir(realDir string) (added bool) {
+	// Check if the directory is already being watched.
 	prevErr, loaded := a.watchedDirs.Load(realDir)
 	if loaded && prevErr == nil {
 		return true
@@ -205,16 +212,19 @@ func (a *app) addToWatchDir(realDir string) (added bool) {
 // addToWatchFile adds a file to the watch list and sets its initial offset.
 // It returns true if the file was added, false if it already exists or an error occurred.
 func (a *app) addToWatchFile(realPath string) (added bool) {
+	// Check if the file is already being watched.
 	if _, ok := a.watchedFiles.Load(realPath); ok {
 		return true
 	}
 
+	// Get file information to determine the initial read offset.
 	fileInfo, err := os.Stat(realPath)
 	if err != nil {
 		log.Printf("Error: getting file info for %s: %v\n", realPath, err)
 		return false
 	}
 
+	// Set the initial offset to the end of the file so we only tail new content.
 	offset := fileInfo.Size()
 	a.watchedFiles.Store(realPath, offset)
 	log.Printf("Info: Watching new file: %s\n", realPath)
@@ -250,6 +260,7 @@ func (a *app) handleDirEvents() {
 			}
 
 			// Handle new files created in a watched directory.
+			// It checks if the event name matches a glob pattern.
 			if event.Op&fsnotify.Create != 0 && a.globMatch(event.Name) {
 				a.addToWatchFile(event.Name)
 			}
@@ -337,6 +348,8 @@ func (a *app) pollFiles() {
 				return true
 			}
 
+			// Print the path of the file before printing its new content.
+			// This helps to distinguish which file the log output is from.
 			if prevPath != path {
 				_, _ = fmt.Fprintln(os.Stdout)
 				_, _ = fmt.Fprintf(os.Stdout, "--- %s ---\n", path)
@@ -361,6 +374,7 @@ func (a *app) pollFiles() {
 }
 
 // scanForNewFiles periodically scans for new files matching the glob patterns.
+// This is a fallback in case fsnotify events are missed.
 func (a *app) scanForNewFiles() {
 	// Create a new Ticker that fires at the specified scanInterval.
 	ticker := time.NewTicker(a.scanInterval)
@@ -373,7 +387,10 @@ func (a *app) scanForNewFiles() {
 	}
 }
 
+// globWalk performs a walk of the filesystem based on glob patterns.
+// It resolves symbolic links and calls a provided action function for each matching file.
 func (a *app) globWalk(action func(realPath string) error) error {
+	// A local map to keep track of processed files to avoid duplicate actions.
 	files := make(map[string]bool)
 	for _, p := range a.globPatterns {
 		// Split the glob pattern into the base directory and the rest of the pattern.
@@ -394,15 +411,18 @@ func (a *app) globWalk(action func(realPath string) error) error {
 				realPath = absolutePath
 			}
 
+			// If the file has already been processed, return.
 			if files[realPath] {
 				return nil
 			}
 
+			// Perform the specified action on the file.
 			err = action(realPath)
 			if err != nil {
 				return err
 			}
 
+			// Mark the file as processed.
 			files[realPath] = true
 			return nil
 		})
@@ -414,7 +434,9 @@ func (a *app) globWalk(action func(realPath string) error) error {
 	return nil
 }
 
+// globMatch checks if a given realPath matches any of the glob patterns.
 func (a *app) globMatch(realPath string) bool {
+	// Use a custom error to signal a match without continuing the walk.
 	found := errors.New("glob is match")
 	err := a.globWalk(func(path string) error {
 		if path == realPath {
