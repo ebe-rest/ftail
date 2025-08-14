@@ -391,8 +391,7 @@ func (a *app) globWalk(action func(realPath string) error) error {
 				realPath = absolutePath
 			}
 
-			_, contain := files[realPath]
-			if contain {
+			if files[realPath] {
 				return nil
 			}
 
@@ -401,6 +400,7 @@ func (a *app) globWalk(action func(realPath string) error) error {
 				return err
 			}
 
+			files[realPath] = true
 			return nil
 		})
 		if err != nil {
