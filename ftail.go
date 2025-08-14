@@ -137,7 +137,7 @@ func (a *app) setupWatchers() {
 	newlyAddedFiles := make(map[string]bool)
 	newlyAddedDirs := make(map[string]bool)
 
-	_ = a.globWalk(func(realPath string) error {
+	err := a.globWalk(func(realPath string) error {
 		// Add the parent directory to the directory watcher.
 		realDir := filepath.Dir(realPath)
 		if added := a.addToWatchDir(realDir); added {
@@ -151,6 +151,9 @@ func (a *app) setupWatchers() {
 
 		return nil
 	})
+	if err != nil {
+		log.Printf("Error: %v\n", err)
+	}
 
 	// Remove files that no longer match the glob pattern.
 	a.watchedFiles.Range(func(key, _ interface{}) bool {
@@ -404,7 +407,8 @@ func (a *app) globWalk(action func(realPath string) error) error {
 			return nil
 		})
 		if err != nil {
-			log.Printf("Error: with glob pattern %s: %v\n", p, err)
+			err = fmt.Errorf("glob pattern %s error: %w", p, err)
+			return err
 		}
 	}
 	return nil
